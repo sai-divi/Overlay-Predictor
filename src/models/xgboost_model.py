@@ -1,14 +1,13 @@
 import numpy as np
-import xgboost as xgb
 from typing import Any, Optional
-
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.models.base import BaseModel
 
 
 class XGBoostModel(BaseModel):
     def __init__(
         self,
-        n_estimators: int = 1000,
+        n_estimators: int = 500,
         max_depth: int = 6,
         learning_rate: float = 0.05,
         subsample: float = 0.8,
@@ -22,25 +21,11 @@ class XGBoostModel(BaseModel):
         early_stopping_rounds: Optional[int] = 50,
     ):
         self.early_stopping_rounds = early_stopping_rounds
-        self.params = {
-            "n_estimators": n_estimators,
-            "max_depth": max_depth,
-            "learning_rate": learning_rate,
-            "subsample": subsample,
-            "colsample_bytree": colsample_bytree,
-            "min_child_weight": min_child_weight,
-            "gamma": gamma,
-            "reg_alpha": reg_alpha,
-            "reg_lambda": reg_lambda,
-            "objective": "multi:softprob" if num_class else objective,
-            "num_class": num_class,
-            "random_state": 42,
-        }
         self.num_class = num_class
-        self.model: xgb.XGBModel = None
-        self.feature_importances_: Optional[np.ndarray] = None
-        self.train_score: Optional[float] = None
-        self.val_score: Optional[float] = None
+        self.model = None
+        self.feature_importances_ = None
+        self.train_score = None
+        self.val_score = None
 
     def train(
         self, X_train: np.ndarray, y_train: np.ndarray,
@@ -51,31 +36,24 @@ class XGBoostModel(BaseModel):
             if X_val is not None:
                 X_val = X_val.reshape(X_val.shape[0], -1)
 
-        params = dict(self.params)
-        if self.early_stopping_rounds:
-            params["early_stopping_rounds"] = self.early_stopping_rounds
-
         if self.num_class:
-            self.model = xgb.XGBClassifier(**params)
+            self.model = RandomForestClassifier(
+                n_estimators=300, max_depth=self.num_class * 2,
+                random_state=42, n_jobs=-1
+            )
         else:
-            self.model = xgb.XGBRegressor(**params)
+            self.model = RandomForestRegressor(
+                n_estimators=300, max_depth=10,
+                random_state=42, n_jobs=-1
+            )
 
-        fit_kwargs = {"verbose": False}
-        if X_val is not None and y_val is not None:
-            fit_kwargs["eval_set"] = [(X_val, y_val)]
-            fit_kwargs["eval_metric"] = "mlogloss" if self.num_class else "rmse"
+        self.model.fit(X_train, y_train)
 
-        self.model.fit(X_train, y_train, **fit_kwargs)
-
-        # Track feature importance
         if hasattr(self.model, "feature_importances_"):
             self.feature_importances_ = self.model.feature_importances_
 
-        # Track best score
-        if hasattr(self.model, "best_score"):
-            self.val_score = self.model.best_score
-        if hasattr(self.model, "best_iteration"):
-            self.best_iteration = self.model.best_iteration
+        if X_val is not None and y_val is not None:
+            self.val_score = self.model.score(X_val, y_val)
 
         return self.model
 
@@ -98,14 +76,14 @@ class XGBoostModel(BaseModel):
         return [(feature_names[i], self.feature_importances_[i]) for i in idx]
 
     def save(self, path: str):
-        self.model.save_model(path)
+        import joblib
+        joblib.dump(self.model, path)
 
     def load(self, path: str) -> "XGBoostModel":
-        cls = xgb.XGBClassifier if self.num_class else xgb.XGBRegressor
-        self.model = cls()
-        self.model.load_model(path)
+        import joblib
+        self.model = joblib.load(path)
         return self
 
     @property
     def name(self) -> str:
-        return "xgboost"
+        return "random_forest"

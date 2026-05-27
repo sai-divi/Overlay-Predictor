@@ -11,4 +11,3 @@ reports/figures/
 notebooks/
 .env
 *.egg-info/
-*.exe
