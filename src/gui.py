@@ -79,8 +79,11 @@ class LiveChart:
         self.name_label=tk.Label(top,textvariable=self.name_var,font=FONT,bg=BG,fg="#888888",anchor=tk.W)
         self.name_label.pack(side=tk.LEFT,padx=(0,6))
         cf=tk.Frame(top,bg=BG); cf.pack(side=tk.RIGHT)
-        btns=[("Refresh",self.fetch_data,FG),("Hook",self.hook_app,"#555555"),
-              ("Attach",self._show_attach,"#555555"),("Invert",self.toggle_invert,"#555555")]
+        def detach():
+            app=self.parent.winfo_toplevel()._app
+            if app: app._detach(); self.status_var.set("Detached")
+        btns=[("Refresh",self.fetch_data,FG),("Hook+",self.hook_app,"#555555"),
+              ("Detach",detach,"#555555"),("Invert",self.toggle_invert,"#555555")]
         for t,c,h in btns:
             tk.Button(cf,text=t,command=c,font=FONT,bg="#1a1a1a",fg=FG,relief=tk.FLAT,bd=1,
                       highlightthickness=1,highlightbackground=h,padx=6).pack(side=tk.LEFT,padx=1)
@@ -262,9 +265,19 @@ class LiveChart:
                 pass
         threading.Thread(target=task,daemon=True).start()
 
-    def _show_attach(self):
-        app=getattr(self.parent.winfo_toplevel(),"_app",None)
-        if app: app._attach_dialog()
+    def _hook_poll_ticker(self):
+        """Poll attached window title for ticker changes."""
+        if not hasattr(self, '_attached_hwnd') or not self._attached_hwnd: return
+        try:
+            ln=ctypes.windll.user32.GetWindowTextLengthW(self._attached_hwnd)
+            if ln==0: return
+            b=ctypes.create_unicode_buffer(ln+1)
+            ctypes.windll.user32.GetWindowTextW(self._attached_hwnd,b,ln+1)
+            tkr=self._extract_ticker_from_title(b.value)
+            if tkr and tkr!=self.ticker.get().upper():
+                self.ticker.set(tkr)
+                self.fetch_data()
+        except: pass
 
     # ================================================================
     # News
@@ -319,11 +332,12 @@ class LiveChart:
             return True
         W=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
         ctypes.windll.user32.EnumWindows(W(cb),0)
-        # Include any window with a ticker-like word in its title
+        self_hwnd=self.parent.winfo_toplevel().winfo_id()
         matches=[]
         for hwnd,title in wins:
+            if hwnd==self_hwnd: continue
             tkr=self._extract_ticker_from_title(title)
-            if tkr: matches.append((title,tkr))
+            if tkr: matches.append((hwnd,title,tkr))
         if not matches:
             self.status_var.set("No windows with ticker-like titles found.")
             return
@@ -353,20 +367,22 @@ class LiveChart:
         tl=tk.Toplevel(self.parent.winfo_toplevel())
         tl.title("Select Trading App"); tl.configure(bg=BG)
         tl.geometry("500x300+200+200"); tl.attributes("-topmost",True)
-        tk.Label(tl,text="Select a window to hook:",font=FONT,bg=BG,fg=FG).pack(pady=(10,5))
+        tk.Label(tl,text="Select a window to hook + attach:",font=FONT,bg=BG,fg=FG).pack(pady=(10,5))
         lb=tk.Listbox(tl,font=FONT_SM,bg=AX_BG,fg=FG,selectbackground=BTN_BG,selectforeground=FG,
             relief=tk.FLAT,borderwidth=0,highlightthickness=1,highlightbackground=SEP_COL)
         lb.pack(fill=tk.BOTH,expand=True,padx=10,pady=5)
-        for title,tkr in matches:
+        for hwnd,title,tkr in matches:
             lb.insert(tk.END,f"{tkr:>6s}  {title[:80]}")
         def pick():
             sel=lb.curselection()
             if not sel: return
-            tkr=matches[sel[0]][1]
+            hwnd,title,tkr=matches[sel[0]]
             self.ticker.set(tkr)
             tl.destroy()
             self.fetch_data()
-            self.status_var.set(f"Hooked: {tkr}")
+            app=self.parent.winfo_toplevel()._app
+            if app: app._attach_to(hwnd)
+            self.status_var.set(f"Hooked + attached: {tkr}")
         def cancel():
             tl.destroy()
         bf=tk.Frame(tl,bg=BG); bf.pack(pady=5)
@@ -383,6 +399,7 @@ class LiveChart:
 
     def _predict_tick(self):
         try:
+            self._hook_poll_ticker()
             # Ensure price_history always has at least one entry
             if len(self.price_history)==0:
                 if not self.df.empty:
@@ -888,52 +905,10 @@ class OverlayApp:
         self.chart.status_var.set(f"Server running at {self._api.url} - Install inject/overlay.user.js in Tampermonkey")
         self.root.protocol("WM_DELETE_WINDOW",self.on_close)
 
-    def _attach_dialog(self):
-        """Show window picker to attach app to a target window."""
-        wins=[]
-        def cb(hwnd,_):
-            if not ctypes.windll.user32.IsWindowVisible(hwnd): return True
-            ln=ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-            if ln==0: return True
-            b=ctypes.create_unicode_buffer(ln+1)
-            ctypes.windll.user32.GetWindowTextW(hwnd,b,ln+1)
-            if b.value: wins.append((hwnd,b.value))
-            return True
-        W=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
-        ctypes.windll.user32.EnumWindows(W(cb),0)
-        self_hwnd=self.root.winfo_id()
-        wins=[(h,t) for h,t in wins if h!=self_hwnd]
-        if not wins:
-            self.chart.status_var.set("No other windows found")
-            return
-        tl=tk.Toplevel(self.root)
-        tl.title("Attach to Window"); tl.configure(bg=BG)
-        tl.geometry("600x350+200+200"); tl.attributes("-topmost",True)
-        tk.Label(tl,text="Select a window to attach to (app will dock beside it):",
-                 font=FONT,bg=BG,fg=FG).pack(pady=(10,5))
-        lb=tk.Listbox(tl,font=FONT_SM,bg=AX_BG,fg=FG,selectbackground=BTN_BG,selectforeground=FG,
-                      relief=tk.FLAT,borderwidth=0,highlightthickness=1,highlightbackground=SEP_COL)
-        lb.pack(fill=tk.BOTH,expand=True,padx=10,pady=5)
-        for hwnd,title in wins[:50]:
-            lb.insert(tk.END,f"0x{hwnd:08X}  {title[:80]}")
-        def do_attach():
-            sel=lb.curselection()
-            if not sel: return
-            hwnd=wins[sel[0]][0]; tl.destroy(); self._attach_to(hwnd)
-        def do_detach():
-            tl.destroy(); self._detach()
-        bf=tk.Frame(tl,bg=BG); bf.pack(pady=5)
-        tk.Button(bf,text="Attach",command=do_attach,font=FONT,bg=BTN_BG,fg=FG,
-                  relief=tk.FLAT,padx=10).pack(side=tk.LEFT,padx=5)
-        tk.Button(bf,text="Detach",command=do_detach,font=FONT,bg=BTN_BG,fg=FG,
-                  relief=tk.FLAT,padx=10).pack(side=tk.LEFT,padx=5)
-        tk.Button(bf,text="Cancel",command=tl.destroy,font=FONT,bg=BTN_BG,fg=FG,
-                  relief=tk.FLAT,padx=10).pack(side=tk.LEFT,padx=5)
-        lb.bind("<Double-Button-1>",lambda e:do_attach())
-
     def _attach_to(self,target_hwnd):
         """Make this window a child of target_hwnd and position at its right edge."""
         self._attached_hwnd=target_hwnd
+        if hasattr(self.chart,'_attached_hwnd'): self.chart._attached_hwnd=target_hwnd
         user32=ctypes.windll.user32
         user32.SetParent(self.root.winfo_id(),target_hwnd)
         self.root.attributes("-topmost",False)
