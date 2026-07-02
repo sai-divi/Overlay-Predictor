@@ -38,8 +38,8 @@ def backtest_strategy(
         if not in_position:
             if signal >= signal_threshold_buy:
                 buy_price = price * (1 + slippage_pct)
-                commission = buy_price * commission_pct
                 invest = cash * position_size
+                commission = invest * commission_pct
                 shares = (invest - commission) / buy_price
                 cash -= invest
                 entry_price = buy_price
@@ -56,8 +56,9 @@ def backtest_strategy(
 
             if sell_signal or stop_hit or take_profit:
                 sell_price = price * (1 - slippage_pct)
-                commission = sell_price * commission_pct
-                proceeds = shares * sell_price - commission
+                gross_proceeds = shares * sell_price
+                commission = gross_proceeds * commission_pct
+                proceeds = gross_proceeds - commission
                 cash += proceeds
                 pnl = proceeds - (shares * entry_price)
                 trades.append({"date": date, "type": "SELL", "price": sell_price, "shares": shares, "pnl": pnl})
@@ -70,8 +71,9 @@ def backtest_strategy(
 
     if in_position:
         final_price = df["Close"].iloc[-1] * (1 - slippage_pct)
-        commission = final_price * commission_pct
-        proceeds = shares * final_price - commission
+        gross_proceeds = shares * final_price
+        commission = gross_proceeds * commission_pct
+        proceeds = gross_proceeds - commission
         cash += proceeds
         trades.append({"date": df.index[-1], "type": "SELL(CLOSE)", "price": final_price, "shares": shares, "pnl": proceeds - shares * entry_price})
         shares = 0.0

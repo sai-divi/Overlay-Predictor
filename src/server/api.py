@@ -42,13 +42,22 @@ def _make_handler(chart):
             price=body.get("price")
             if not ticker or price is None or not chart:
                 self._json({"error":"missing ticker or price"},400); return
-            if chart.ticker.get().upper()!=ticker:
+            ticker_changed=chart.ticker.get().upper()!=ticker
+            if ticker_changed:
                 chart.ticker.set(ticker)
                 chart._trained=False
+                chart._pred_dir=0
+                chart._pred_conf=0.0
+                chart._reasons=["Loading ticker history"]
+                try:
+                    chart.df=chart.df.iloc[0:0]
+                    chart.price_history.clear()
+                except Exception:
+                    pass
                 threading.Thread(target=chart.fetch_data,daemon=True).start()
             try:
                 chart.price_history.append((datetime.now(),float(price)))
-                if not chart._trained and not chart.df.empty:
+                if not ticker_changed and not chart._trained and not chart.df.empty:
                     chart._train_model(chart.df)
                 chart._run_prediction(float(price))
                 try: chart.parent.after(0,chart._update_predict_display)

@@ -42,6 +42,9 @@ def backtest_pipeline(
         risk_free=cfg.analysis.risk_free_rate,
     )
 
+    if "error" in strategy_result:
+        return {"error": strategy_result["error"], "ticker": ticker}
+
     result = {**strategy_result, "risk": risk}
 
     if plot:

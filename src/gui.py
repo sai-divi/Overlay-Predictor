@@ -52,6 +52,9 @@ class LiveChart:
         self._model=None; self._feature_cols=None; self._trained=False
         self.price_history=deque(maxlen=120)
         self.timer_id=None
+        self._last_live_fetch=datetime.min
+        self._fetching_live_price=False
+        self._live_poll_seconds=15
         self._pred_dir=0; self._pred_conf=0.0; self._latest_price=0.0
         self._reasons=[]
         self._mom1=0; self._mom5=0; self._vol=0; self._pl=0; self._ph=0; self._rsv=50; self._navg=0
@@ -181,8 +184,9 @@ class LiveChart:
                     self.parent.after(0,lambda: self.status_var.set(f"No data for {ticker}")); return
                 df=add_all_indicators(df,self.cfg.indicators); self.df=df
                 now=datetime.now(); self.price_history.clear()
-                for i in range(min(20,len(df))):
-                    self.price_history.appendleft((now-timedelta(seconds=(20-i)*60),float(df["Close"].iloc[-(i+1)])))
+                n_hist=min(20,len(df))
+                for i in range(n_hist):
+                    self.price_history.append((now-timedelta(seconds=(n_hist-i)*60),float(df["Close"].iloc[-(n_hist-i)])))
                 self.news_articles=[]; self.news_sentiment=None
                 self._train_model(df)
                 name=self._lookup_name(ticker)
@@ -216,35 +220,39 @@ class LiveChart:
         return t
 
     def _train_model(self,df):
+        fc=[]; is_class=False
         try:
-            tc=[c for c in df.columns if c.lower().startswith("target_")]
-            if not tc:
-                df=create_target_labels(df,self.cfg.data.prediction_horizon)
-                tc=[c for c in df.columns if c.lower().startswith("target_")]
-            if not tc: return
-            fc=[c for c in df.columns if c not in tc and c not in ("Buy","Sell","Signal_Strength","Confluence_Score")
-                and df[c].dtype in (np.float64,np.int64) and df[c].notna().sum()>len(df)*0.5]
+            # Use stock-prophet style 5-day forward binary target
+            df=create_target_labels_5d(df, future_days=self.cfg.model.future_target_days)
+            target_col="Target_Binary"
+            is_class=True
+            fc=[c for c in df.columns if c not in ("Target_Binary","Target_Return","Target_Class",
+                "Buy","Sell","Signal_Strength","Confluence_Score")
+                and pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().sum()>len(df)*0.5]
             fc=[c for c in fc if c not in ("Open","High","Low","Close","Volume","target","Dividends","Stock Splits")]
-            target_col="target_Class" if "target_Class" in df.columns else tc[0]
-            is_class=target_col=="target_Class"
-            train=df.dropna(subset=fc+[target_col])
-            if len(train)<30: return
+            train=df.replace([np.inf,-np.inf],np.nan).dropna(subset=fc+[target_col])
+            if len(train)<60: return
             split=int(len(train)*0.8)
-            X_tr,y_tr=train[fc].values[:split],train[target_col].values[:split]
-            X_va,y_va=train[fc].values[split:],train[target_col].values[split:]
-            if is_class:
-                y_tr=y_tr.astype(int); y_va=y_va.astype(int)
-                # Only use classification if all 3 classes present in training
-                if len(np.unique(y_tr))<2: is_class=False
-            self._model=XGBoostModel(early_stopping_rounds=50, num_class=(3 if is_class and len(np.unique(y_tr))>=2 else None))
-            self._model.train(X_tr,y_tr,X_va,y_va if is_class else None)
+            X_tr,y_tr=train[fc].values[:split],train[target_col].values[:split].astype(int)
+            X_va,y_va=train[fc].values[split:],train[target_col].values[split:].astype(int)
+            if len(np.unique(y_tr))<2: return
+            self._model=XGBoostModel(
+                early_stopping_rounds=50, num_class=2,
+                use_grid_search=self.cfg.model.use_grid_search,
+                grid_search_cv=self.cfg.model.grid_search_cv,
+                class_weight_balanced=self.cfg.model.class_weight_balanced,
+            )
+            self._model.train(X_tr,y_tr,X_va,y_va)
             self._feature_cols=fc; self._trained=True
         except Exception as exc: self._trained=False; self.status_var.set(f"Model: {exc}")
-        # Fallback: if classification failed, try regression
-        if not self._trained and is_class:
+        # Fallback: regression if binary classification fails
+        if not self._trained:
             try:
-                target_col="target_Return"
-                train=df.dropna(subset=fc+[target_col])
+                target_col="Target_Return"
+                if target_col not in df.columns:
+from src.features.signals import create_target_labels, create_target_labels_5d
+                    df=create_target_labels(df,horizon=1)
+                train=df.replace([np.inf,-np.inf],np.nan).dropna(subset=fc+[target_col])
                 if len(train)>=30:
                     self._model=XGBoostModel(early_stopping_rounds=50)
                     split=int(len(train)*0.8)
@@ -397,15 +405,51 @@ class LiveChart:
     # ================================================================
     def _start_predict_loop(self): self._predict_tick()
 
+    def _maybe_refresh_live_price(self):
+        ticker=self.ticker.get().strip().upper()
+        if not ticker or self._fetching_live_price:
+            return
+        now=datetime.now()
+        if (now-self._last_live_fetch).total_seconds()<self._live_poll_seconds:
+            return
+        self._last_live_fetch=now
+        self._fetching_live_price=True
+        def task():
+            price=None
+            try:
+                price=fetch_latest_price(ticker)
+            except Exception:
+                price=None
+            def apply_price():
+                self._fetching_live_price=False
+                if price is None or price<=0:
+                    return
+                p=float(price)
+                self._latest_price=p
+                should_append=not self.price_history
+                if self.price_history:
+                    last_time,last_price=self.price_history[-1]
+                    age=(datetime.now()-last_time).total_seconds()
+                    changed=abs(p-last_price)/max(abs(last_price),1e-8)>0.00001
+                    should_append=changed or age>=self._live_poll_seconds
+                if should_append:
+                    self.price_history.append((datetime.now(),p))
+            try:
+                self.parent.after(0,apply_price)
+            except Exception:
+                self._fetching_live_price=False
+        threading.Thread(target=task,daemon=True).start()
+
     def _predict_tick(self):
         try:
             self._hook_poll_ticker()
+            self._maybe_refresh_live_price()
             # Ensure price_history always has at least one entry
             if len(self.price_history)==0:
                 if not self.df.empty:
-                    lc=float(self.df["Close"].iloc[-1]); nw=datetime.now()
-                    for i in range(min(10,len(self.df))):
-                        self.price_history.appendleft((nw-timedelta(seconds=(10-i)*60),float(self.df["Close"].iloc[-(i+1)])))
+                    nw=datetime.now(); n_ph=min(10,len(self.df))
+                    for i in range(n_ph):
+                        self.price_history.append((nw-timedelta(seconds=(n_ph-i)*60),float(self.df["Close"].iloc[-(n_ph-i)])))
                 elif self._latest_price>0:
                     self.price_history.append((datetime.now(),self._latest_price))
             if len(self.price_history)>0:
@@ -435,7 +479,8 @@ class LiveChart:
         prices=np.array([p for _,p in self.price_history])
         times_arr=np.array([t for t,_ in self.price_history])
         lp=prices[-1]; self._latest_price=lp
-        ret=np.diff(prices)/prices[:-1]
+        denom=np.where(np.abs(prices[:-1])>1e-8,prices[:-1],np.nan)
+        ret=np.nan_to_num(np.diff(prices)/denom,nan=0.0,posinf=0.0,neginf=0.0)
         def ma(x,w): return np.mean(x[-w:]) if len(x)>=w else np.mean(x)
         sma5=ma(prices,5); sma10=ma(prices,10)
         m1=(prices[-1]/prices[-2]-1)*100 if n>=2 else 0
@@ -608,17 +653,19 @@ class LiveChart:
                     probs=self._model.predict_proba(X)[0]
                     pred_cls=int(np.argmax(probs))
                     ml_conf_v=float(probs[pred_cls])*100
-                    # Map class -1,0,1 or 0,1,2
-                    if len(probs)==3:
-                        cls_map={0:-1,1:0,2:1}
-                        ml_dir=cls_map.get(pred_cls,0)
+                    labels=getattr(self._model,"class_labels_",None)
+                    if labels is not None and len(labels)>pred_cls:
+                        pred_label=int(labels[pred_cls])
+                        ml_dir=1 if pred_label>0 else(-1 if pred_label<0 else 0)
+                    elif len(probs)==3:
+                        ml_dir={0:-1,1:0,2:1}.get(pred_cls,0)
                     elif len(probs)==2:
-                        ml_dir=1 if pred_cls==1 else -1
+                        pred_label=int(self._model.predict(X)[0]) if hasattr(self._model,"predict") else pred_cls
+                        ml_dir=1 if pred_label>0 else(-1 if pred_label<0 else 0)
                     else:
                         ml_dir=0
                     ml_conf=ml_conf_v
-                    ppt_val=float(self._model.predict(X)[0]) if hasattr(self._model,"predict") else 0
-                    ppt=lp*(1+ppt_val*0.01) if abs(ppt_val)<5 else None
+                    ppt=None
                     ml_reason=f"ML (cls {ml_conf:.0f}%)"
                 else:
                     rp=float(self._model.predict(X)[0])
@@ -781,8 +828,8 @@ class LiveChart:
         # Final summary
         votes=iv.get("votes",[])
         try:
-            buy_w=sum(float(w) for d,_,w in votes if d==1)
-            sell_w=sum(float(w) for d,_,w in votes if d==-1)
+            buy_w=sum(float(weight) for d,weight,_ in votes if d==1)
+            sell_w=sum(float(weight) for d,weight,_ in votes if d==-1)
         except (TypeError, ValueError):
             buy_w=0; sell_w=0
         if buy_w>sell_w and pd_==1:

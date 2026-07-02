@@ -5,17 +5,29 @@ from typing import Optional
 from datetime import datetime
 
 
+def _configure_yfinance_cache():
+    try:
+        cache_dir = Path("data") / "cache" / "yfinance"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if hasattr(yf, "set_tz_cache_location"):
+            yf.set_tz_cache_location(str(cache_dir))
+    except Exception:
+        pass
+
+
 def fetch_historical(
     ticker: str,
     start: str,
     end: str,
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
+    _configure_yfinance_cache()
     df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
     if df.empty:
         raise ValueError(f"No data for {ticker} from {start} to {end}")
     df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
     df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(save_path)
@@ -23,29 +35,45 @@ def fetch_historical(
 
 
 def fetch_realtime(ticker: str, interval: str = "1m", period: str = "5d") -> pd.DataFrame:
+    _configure_yfinance_cache()
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
     if df.empty:
         raise ValueError(f"No real-time data for {ticker}")
     df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
     df.index = pd.to_datetime(df.index)
-    return df
+    return df.sort_index()
 
 
-def fetch_latest_price(ticker: str) -> float:
-    tk = yf.Ticker(ticker)
-    hist = tk.history(period="1d", interval="1m")
-    if hist.empty:
-        return tk.fast_info.get("lastPrice", None)
-    return hist["Close"].iloc[-1]
+def fetch_latest_price(ticker: str) -> Optional[float]:
+    try:
+        _configure_yfinance_cache()
+        tk = yf.Ticker(ticker)
+        hist = tk.history(period="5d", interval="1m", auto_adjust=True)
+        if not hist.empty and "Close" in hist:
+            close = hist["Close"].dropna()
+            if not close.empty:
+                return float(close.iloc[-1])
+        fast_info = getattr(tk, "fast_info", {}) or {}
+        for key in ("lastPrice", "last_price", "regularMarketPrice"):
+            try:
+                value = fast_info.get(key)
+                if value is not None:
+                    return float(value)
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
 
 
 def fetch_recent(ticker: str, interval: str = "1m") -> pd.DataFrame:
+    _configure_yfinance_cache()
     df = yf.download(ticker, period="1d", interval=interval, auto_adjust=True, progress=False)
     if df.empty:
         return df
     df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
     df.index = pd.to_datetime(df.index)
-    return df
+    return df.sort_index()
 
 
 def _fmt_earnings(val):
@@ -63,6 +91,7 @@ def _fmt_earnings(val):
 
 def lookup_ticker_info(ticker: str) -> dict:
     try:
+        _configure_yfinance_cache()
         tk = yf.Ticker(ticker)
         info = tk.info
         if not info or "quoteType" not in info:

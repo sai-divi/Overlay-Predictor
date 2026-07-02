@@ -37,8 +37,14 @@ def generate_rule_based_signals(df: pd.DataFrame, config=None) -> pd.DataFrame:
         conditions_buy.append((df["SMA_50"] > df["SMA_200"]) & (df["SMA_50"].shift(1) <= df["SMA_200"].shift(1)))
         conditions_sell.append((df["SMA_50"] < df["SMA_200"]) & (df["SMA_50"].shift(1) >= df["SMA_200"].shift(1)))
 
-    df["Signal_Buy_Rule"] = (pd.concat(conditions_buy, axis=1).sum(axis=1) if conditions_buy else 0) / len(conditions_buy) if conditions_buy else 0
-    df["Signal_Sell_Rule"] = (pd.concat(conditions_sell, axis=1).sum(axis=1) if conditions_sell else 0) / len(conditions_sell) if conditions_sell else 0
+    if conditions_buy:
+        df["Signal_Buy_Rule"] = pd.concat(conditions_buy, axis=1).sum(axis=1) / len(conditions_buy)
+    else:
+        df["Signal_Buy_Rule"] = 0
+    if conditions_sell:
+        df["Signal_Sell_Rule"] = pd.concat(conditions_sell, axis=1).sum(axis=1) / len(conditions_sell)
+    else:
+        df["Signal_Sell_Rule"] = 0
 
     df["Signal_Strength"] = df["Signal_Buy_Rule"] - df["Signal_Sell_Rule"]
     return df
@@ -47,10 +53,21 @@ def generate_rule_based_signals(df: pd.DataFrame, config=None) -> pd.DataFrame:
 def create_target_labels(df: pd.DataFrame, horizon: int = 1, threshold_pct: float = 0.0) -> pd.DataFrame:
     df = df.copy()
     future_price = df["Close"].shift(-horizon)
-    future_return = (future_price - df["Close"]) / df["Close"]
+    future_return = (future_price - df["Close"]) / df["Close"].replace(0, np.nan)
 
-    df["target_Return"] = future_return
-    df["target_Class"] = 0
-    df.loc[future_return > threshold_pct, "target_Class"] = 1
-    df.loc[future_return < -threshold_pct, "target_Class"] = -1
+    df["Target_Return"] = future_return
+    df["Target_Class"] = 0
+    df.loc[future_return > threshold_pct, "Target_Class"] = 1
+    df.loc[future_return < -threshold_pct, "Target_Class"] = -1
+    return df
+
+
+def create_target_labels_5d(df: pd.DataFrame, future_days: int = 5) -> pd.DataFrame:
+    """
+    Binary 5-day forward target (stock-prophet style).
+    Target_Binary = 1 if price increases in `future_days`, else 0.
+    """
+    df = df.copy()
+    future_price = df["Close"].shift(-future_days)
+    df["Target_Binary"] = (future_price > df["Close"]).astype(int)
     return df

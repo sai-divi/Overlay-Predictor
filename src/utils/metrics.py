@@ -3,6 +3,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
 def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return {"MSE": 0.0, "RMSE": 0.0, "MAE": 0.0, "R2": 0.0, "MAPE": 0.0}
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
     mae = mean_absolute_error(y_true, y_pred)
@@ -18,6 +20,8 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 def direction_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    if len(y_true) < 2 or len(y_pred) < 2:
+        return 0.0
     true_dir = np.sign(np.diff(y_true))
     pred_dir = np.sign(np.diff(y_pred))
     return np.mean(true_dir == pred_dir)

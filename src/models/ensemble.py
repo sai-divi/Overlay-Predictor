@@ -8,8 +8,15 @@ from src.models.base import BaseModel
 
 class EnsembleModel(BaseModel):
     def __init__(self, models: List[BaseModel], weights: Optional[List[float]] = None):
+        if not models:
+            raise ValueError("EnsembleModel requires at least one model")
         self.models = models
-        self.weights = np.array(weights) if weights else np.ones(len(models)) / len(models)
+        if weights and len(weights) == len(models):
+            weights_arr = np.array(weights, dtype=float)
+        else:
+            weights_arr = np.ones(len(models), dtype=float)
+        total = weights_arr.sum()
+        self.weights = weights_arr / total if total else np.ones(len(models)) / len(models)
 
     def train(
         self, X_train: np.ndarray, y_train: np.ndarray,

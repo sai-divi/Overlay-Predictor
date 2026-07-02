@@ -3,12 +3,17 @@ import pandas as pd
 
 
 def compute_var(returns: np.ndarray, confidence: float = 0.95) -> float:
+    if len(returns) == 0:
+        return 0.0
     return np.percentile(returns, (1 - confidence) * 100)
 
 
 def compute_cvar(returns: np.ndarray, confidence: float = 0.95) -> float:
+    if len(returns) == 0:
+        return 0.0
     var = compute_var(returns, confidence)
-    return returns[returns <= var].mean()
+    tail = returns[returns <= var]
+    return tail.mean() if len(tail) else 0.0
 
 
 def compute_beta(returns: np.ndarray, market_returns: np.ndarray) -> float:
@@ -35,6 +40,9 @@ def compute_calmar(returns: np.ndarray, max_drawdown_pct: float) -> float:
 
 
 def full_risk_report(returns: np.ndarray, max_dd_pct: float = 0, market_returns: np.ndarray = None, risk_free: float = 0.05) -> dict:
+    returns = np.asarray(returns, dtype=float)
+    if len(returns) == 0:
+        returns = np.array([0.0])
     return {
         "volatility_pct": round(np.std(returns) * np.sqrt(252) * 100, 2),
         "sharpe_ratio": round(np.mean(returns - risk_free / 252) / np.std(returns) * np.sqrt(252), 2) if np.std(returns) > 0 else 0,

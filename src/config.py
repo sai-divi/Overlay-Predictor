@@ -30,7 +30,7 @@ class StrategyConfig:
     commission_pct: float = 0.001
     slippage_pct: float = 0.001
     signal_threshold_buy: float = 0.6
-    signal_threshold_sell: float = 0.6
+    signal_threshold_sell: float = -0.6
 
 
 @dataclass
@@ -48,6 +48,10 @@ class ModelConfig:
     xgb_colsample_bytree: float = 0.8
     sequence_length: int = 60
     ensemble_weights: List[float] = field(default_factory=lambda: [0.6, 0.4])
+    use_grid_search: bool = True
+    grid_search_cv: int = 5
+    future_target_days: int = 5
+    class_weight_balanced: bool = True
 
 
 @dataclass

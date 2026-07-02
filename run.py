@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import Config
 from src.pipeline.train import train_pipeline
-from src.pipeline.backtest import backtest
+from src.pipeline.backtest import backtest_pipeline
 
 
 def main():
@@ -29,7 +29,7 @@ def main():
     if args.mode == "train":
         train_pipeline(cfg, args.ticker)
     elif args.mode == "backtest":
-        backtest(cfg, args.ticker, plot=True)
+        backtest_pipeline(cfg, args.ticker, plot=True)
 
 
 if __name__ == "__main__":

@@ -2,26 +2,39 @@ import pandas as pd
 import numpy as np
 
 
+def _safe_div(numerator, denominator, default=np.nan):
+    denom = denominator.replace(0, np.nan) if hasattr(denominator, "replace") else denominator
+    result = numerator / denom
+    if hasattr(result, "replace"):
+        return result.replace([np.inf, -np.inf], np.nan).fillna(default)
+    if not np.isfinite(result):
+        return default
+    return result
+
+
 def add_sma(df: pd.DataFrame, windows: list = None) -> pd.DataFrame:
     windows = windows or [10, 20, 50, 200]
     for w in windows:
-        df[f"SMA_{w}"] = df["Close"].rolling(window=w).mean()
+        df[f"SMA_{w}"] = df["Close"].rolling(window=w, min_periods=w).mean()
     return df
 
 
 def add_ema(df: pd.DataFrame, windows: list = None) -> pd.DataFrame:
     windows = windows or [10, 20, 50]
     for w in windows:
-        df[f"EMA_{w}"] = df["Close"].ewm(span=w, adjust=False).mean()
+        df[f"EMA_{w}"] = df["Close"].ewm(span=w, adjust=False, min_periods=1).mean()
     return df
 
 
 def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = delta.clip(lower=0).rolling(window=period, min_periods=period).mean()
+    loss = (-delta.clip(upper=0)).rolling(window=period, min_periods=period).mean()
     rs = gain / loss.replace(0, np.nan)
-    df[f"RSI_{period}"] = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
+    rsi = rsi.mask((loss == 0) & (gain == 0), 50.0)
+    df[f"RSI_{period}"] = rsi
     df[f"RSI_{period}_ma"] = df[f"RSI_{period}"].rolling(3).mean()
     return df
 
@@ -36,13 +49,14 @@ def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) 
 
 
 def add_bollinger_bands(df: pd.DataFrame, period: int = 20, std: float = 2.0) -> pd.DataFrame:
-    sma = df["Close"].rolling(window=period).mean()
-    s = df["Close"].rolling(window=period).std()
+    sma = df["Close"].rolling(window=period, min_periods=period).mean()
+    s = df["Close"].rolling(window=period, min_periods=period).std()
     df["BB_middle"] = sma
     df["BB_upper"] = sma + std * s
     df["BB_lower"] = sma - std * s
-    df["BB_width"] = (df["BB_upper"] - df["BB_lower"]) / df["BB_middle"]
-    df["BB_position"] = (df["Close"] - df["BB_lower"]) / (df["BB_upper"] - df["BB_lower"])
+    band_width = df["BB_upper"] - df["BB_lower"]
+    df["BB_width"] = _safe_div(band_width, df["BB_middle"], default=0.0)
+    df["BB_position"] = _safe_div(df["Close"] - df["BB_lower"], band_width, default=0.5)
     return df
 
 
@@ -51,16 +65,16 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     high_close = (df["High"] - df["Close"].shift()).abs()
     low_close = (df["Low"] - df["Close"].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df[f"ATR_{period}"] = tr.rolling(window=period).mean()
-    df[f"ATR_pct"] = df[f"ATR_{period}"] / df["Close"] * 100
+    df[f"ATR_{period}"] = tr.rolling(window=period, min_periods=period).mean()
+    df[f"ATR_pct"] = _safe_div(df[f"ATR_{period}"], df["Close"], default=0.0) * 100
     return df
 
 
 def add_obv(df: pd.DataFrame) -> pd.DataFrame:
     obv = (np.sign(df["Close"].diff()) * df["Volume"]).fillna(0).cumsum()
     df["OBV"] = obv
-    df["OBV_SMA"] = obv.rolling(20).mean()
-    df["OBV_ratio"] = obv / obv.rolling(20).mean()
+    df["OBV_SMA"] = obv.rolling(20, min_periods=20).mean()
+    df["OBV_ratio"] = _safe_div(obv, df["OBV_SMA"], default=1.0)
     return df
 
 
@@ -73,14 +87,14 @@ def add_roc(df: pd.DataFrame, period: int = 10) -> pd.DataFrame:
 def add_williams_r(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     highest = df["High"].rolling(window=period).max()
     lowest = df["Low"].rolling(window=period).min()
-    df["Williams_%R"] = -100 * (highest - df["Close"]) / (highest - lowest)
+    df["Williams_%R"] = -100 * _safe_div(highest - df["Close"], highest - lowest, default=0.5)
     return df
 
 
 def add_stochastic(df: pd.DataFrame, k: int = 14, d: int = 3) -> pd.DataFrame:
     lowest = df["Low"].rolling(window=k).min()
     highest = df["High"].rolling(window=k).max()
-    df["Stoch_%K"] = (df["Close"] - lowest) / (highest - lowest) * 100
+    df["Stoch_%K"] = _safe_div(df["Close"] - lowest, highest - lowest, default=0.5) * 100
     df["Stoch_%D"] = df["Stoch_%K"].rolling(window=d).mean()
     return df
 
@@ -89,8 +103,8 @@ def add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     df["Price_Change"] = df["Close"].pct_change()
     df["Price_Change_5"] = df["Close"].pct_change(5)
     df["Price_Change_21"] = df["Close"].pct_change(21)
-    df["High_Low_Ratio"] = df["High"] / df["Low"]
-    df["Close_Open_Ratio"] = df["Close"] / df["Open"]
+    df["High_Low_Ratio"] = _safe_div(df["High"], df["Low"], default=1.0)
+    df["Close_Open_Ratio"] = _safe_div(df["Close"], df["Open"], default=1.0)
     df["Volume_Change"] = df["Volume"].pct_change()
     df["Volume_Change_5"] = df["Volume"].pct_change(5)
     return df
@@ -100,18 +114,21 @@ def add_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     high, low, close = df["High"], df["Low"], df["Close"]
     plus_dm = high.diff()
     minus_dm = low.diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    minus_dm = minus_dm.abs()
+    plus_dm = plus_dm.clip(lower=0)
+    minus_dm = (-minus_dm).clip(lower=0)
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     atr = tr.rolling(period).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1/period).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/period).mean() / atr)
-    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    plus_di = 100 * _safe_div(plus_dm.ewm(alpha=1/period).mean(), atr, default=0.0)
+    minus_di = 100 * _safe_div(minus_dm.ewm(alpha=1/period).mean(), atr, default=0.0)
+    dx = _safe_div((plus_di - minus_di).abs(), plus_di + minus_di, default=0.0) * 100
     df["ADX"] = dx.rolling(period).mean()
     df["DI_plus"] = plus_di
     df["DI_minus"] = minus_di
-    df["Trend_Strength"] = "strong" if df["ADX"].iloc[-1] > 25 else ("weak" if len(df) > 1 else "unknown") if len(df) else "unknown"
+    if len(df) > 0 and "ADX" in df:
+        last_adx = df["ADX"].iloc[-1]
+        df["Trend_Strength"] = "strong" if pd.notna(last_adx) and last_adx > 25 else "weak" if len(df) > 1 else "unknown"
+    else:
+        df["Trend_Strength"] = "unknown"
     return df
 
 
@@ -120,7 +137,10 @@ def add_mfi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     raw = typical * df["Volume"]
     pos_flow = raw.where(typical > typical.shift(1), 0).rolling(period).sum()
     neg_flow = raw.where(typical < typical.shift(1), 0).rolling(period).sum()
-    mfi = 100 - (100 / (1 + pos_flow / neg_flow.replace(0, np.nan)))
+    money_ratio = _safe_div(pos_flow, neg_flow, default=np.nan)
+    mfi = 100 - (100 / (1 + money_ratio))
+    mfi = mfi.mask((neg_flow == 0) & (pos_flow > 0), 100.0)
+    mfi = mfi.mask((neg_flow == 0) & (pos_flow == 0), 50.0)
     df["MFI"] = mfi
     return df
 
@@ -130,15 +150,19 @@ def add_keltner(df: pd.DataFrame, period: int = 20, atr_mult: float = 1.5) -> pd
     atr = df["ATR_14"] if "ATR_14" in df else (df["High"] - df["Low"]).rolling(period).mean()
     df["Keltner_Upper"] = ema + atr_mult * atr
     df["Keltner_Lower"] = ema - atr_mult * atr
-    df["Keltner_Pos"] = (df["Close"] - df["Keltner_Lower"]) / (df["Keltner_Upper"] - df["Keltner_Lower"])
+    df["Keltner_Pos"] = _safe_div(
+        df["Close"] - df["Keltner_Lower"],
+        df["Keltner_Upper"] - df["Keltner_Lower"],
+        default=0.5,
+    )
     return df
 
 
 def add_aroon(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    high_idx = df["High"].rolling(period).apply(np.argmax) + 1
-    low_idx = df["Low"].rolling(period).apply(np.argmin) + 1
-    df["Aroon_Up"] = ((period - high_idx) / period) * 100
-    df["Aroon_Down"] = ((period - low_idx) / period) * 100
+    high_idx = df["High"].rolling(period, min_periods=period).apply(np.argmax, raw=True)
+    low_idx = df["Low"].rolling(period, min_periods=period).apply(np.argmin, raw=True)
+    df["Aroon_Up"] = ((high_idx + 1) / period) * 100
+    df["Aroon_Down"] = ((low_idx + 1) / period) * 100
     df["Aroon_Osc"] = df["Aroon_Up"] - df["Aroon_Down"]
     return df
 
@@ -151,14 +175,20 @@ def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     df["Pivot"] = pivot
     df["R1"] = 2 * pivot - prev_low
     df["S1"] = 2 * pivot - prev_high
-    df["Pivot_Dist"] = (df["Close"] - df["S1"]) / (df["R1"] - df["S1"]).replace(0, np.nan)
+    df["Pivot_Dist"] = _safe_div(df["Close"] - df["S1"], df["R1"] - df["S1"], default=0.5)
     return df
 
 
 def add_market_regime(df: pd.DataFrame) -> pd.DataFrame:
-    df["Regime_SMA"] = df["Close"] / df["SMA_200"]
-    df["Regime_Volatility"] = df["Price_Change"].rolling(21).std() * np.sqrt(252)
-    df["Regime_Range"] = df["Close"] / df["Close"].rolling(100).mean()
+    if "SMA_200" in df.columns:
+        df["Regime_SMA"] = _safe_div(df["Close"], df["SMA_200"], default=1.0)
+    else:
+        df["Regime_SMA"] = 1.0
+    if "Price_Change" in df.columns:
+        df["Regime_Volatility"] = df["Price_Change"].rolling(21).std() * np.sqrt(252)
+    else:
+        df["Regime_Volatility"] = 0.0
+    df["Regime_Range"] = _safe_div(df["Close"], df["Close"].rolling(min(100, len(df))).mean(), default=1.0)
     return df
 
 

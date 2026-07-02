@@ -101,8 +101,12 @@ def _extract(item: dict) -> dict:
     pub = content.get("pubDate") or content.get("publication_date") or ""
     if isinstance(pub, str) and pub:
         try:
-            pub = datetime.strptime(pub.replace("Z", ""), "%Y-%m-%dT%H:%M:%S").strftime("%m/%d %H:%M")
-        except ValueError:
+            if "T" in pub:
+                dt_part = pub[:19]
+                pub = datetime.strptime(dt_part, "%Y-%m-%dT%H:%M:%S").strftime("%m/%d %H:%M")
+            else:
+                pub = pub[:16]
+        except (ValueError, IndexError):
             pub = pub[:16]
     provider = content.get("provider", {})
     if isinstance(provider, dict):
